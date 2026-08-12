@@ -211,6 +211,28 @@
     <p class="sub">Click canvas to place, drag to move, generate to randomize.</p>
 
     <div class="section">
+      <h2>Canvas size</h2>
+      <select id="canvasPreset">
+        <option value="960x600" selected>Landscape (960 × 600)</option>
+        <option value="800x800">Square (800 × 800)</option>
+        <option value="1200x1200">Large square (1200 × 1200)</option>
+        <option value="800x1200">Portrait (800 × 1200)</option>
+        <option value="1600x900">Widescreen (1600 × 900)</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <div class="row" style="margin-top:10px">
+        <label for="canvasWidth">Width</label>
+        <input type="number" id="canvasWidth" min="200" max="4000" value="960" style="width:70px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+      </div>
+      <div class="row">
+        <label for="canvasHeight">Height</label>
+        <input type="number" id="canvasHeight" min="200" max="4000" value="600" style="width:70px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+      </div>
+      <button class="btn secondary" id="btnApplySize">Apply size</button>
+      <p class="hint">Existing points rescale proportionally to fit the new canvas.</p>
+    </div>
+
+    <div class="section">
       <h2>Seeds</h2>
       <div class="row">
         <label for="seedCount">Seed count</label>
@@ -219,6 +241,16 @@
       <input type="range" id="seedCountSlider" min="2" max="600" value="120">
       <button class="btn" id="btnGenerate" style="margin-top:10px">Generate random seeds</button>
       <button class="btn secondary" id="btnRelax">Relax points (Lloyd)</button>
+    </div>
+
+    <div class="section">
+      <h2>Cell size</h2>
+      <div class="slider-row">
+        <div class="row"><label for="sizeVarianceSlider">Size variance</label><input type="number" id="sizeVarianceNumber" min="0" max="600" value="0" style="width:56px;padding:2px 5px;border:1px solid var(--border);border-radius:5px;font-size:12px;"></div>
+        <input type="range" id="sizeVarianceSlider" min="0" max="100" step="1" value="0">
+      </div>
+      <p class="hint">0 = uniform cell sizes. Higher values create a bigger spread between the smallest and largest cells. Type a value past the slider's end for extreme spread (some cells may get absorbed by neighbors).</p>
+      <button class="btn secondary" id="btnRandomizeSizes">Randomize sizes</button>
     </div>
 
     <div class="section">
@@ -280,11 +312,26 @@
     </div>
 
     <div class="section">
+      <h2>Nucleus</h2>
+      <label class="checkline"><input type="checkbox" id="showNucleus"> Add a nucleus to each cell</label>
+      <div class="slider-row">
+        <div class="row"><label for="nucleusSize">Nucleus size</label><span class="val" id="nucleusSizeValue">32</span></div>
+        <input type="range" id="nucleusSize" min="2" max="90" step="1" value="32">
+      </div>
+      <label class="checkline"><input type="checkbox" id="nucleusAutoTint" checked> Auto color (shade of cell)</label>
+      <div class="colorpair">
+        <div class="row"><label for="nucleusColor">Nucleus color</label></div>
+        <input type="color" id="nucleusColor" value="#2b2f38">
+      </div>
+    </div>
+
+    <div class="section">
       <h2>Export</h2>
       <div class="btn-row">
         <button class="btn" id="btnExportSVG">Export SVG</button>
         <button class="btn secondary" id="btnExportPNG">Export PNG</button>
       </div>
+      <button class="btn secondary" id="btnCopySVG">Copy SVG to clipboard</button>
       <button class="btn secondary" id="btnClear">Clear all</button>
     </div>
   </aside>
@@ -301,7 +348,7 @@
 (function(){
   "use strict";
 
-  const W = 960, H = 600;
+  let W = 960, H = 600;
   const svg = document.getElementById('svg');
   const statusEl = document.getElementById('status');
 
@@ -334,6 +381,16 @@
   const showEdges = el('showEdges');
   const showSeeds = el('showSeeds');
   const paletteSel = el('palette');
+  const sizeVarianceSlider = el('sizeVarianceSlider');
+  const sizeVarianceNumber = el('sizeVarianceNumber');
+  const canvasPreset = el('canvasPreset');
+  const canvasWidthInput = el('canvasWidth');
+  const canvasHeightInput = el('canvasHeight');
+  const showNucleus = el('showNucleus');
+  const nucleusSize = el('nucleusSize');
+  const nucleusSizeValue = el('nucleusSizeValue');
+  const nucleusAutoTint = el('nucleusAutoTint');
+  const nucleusColor = el('nucleusColor');
 
   function currentMode(){
     return document.querySelector('input[name="mode"]:checked').value;
@@ -368,13 +425,28 @@
     return out;
   }
 
-  function computeVoronoi(pts, gap){
+  // sizeVariance: 0-100. 0 = classic equidistant Voronoi (all weights equal).
+  // Higher values turn this into a power diagram (weighted Voronoi) so sites
+  // with a larger rolled "sizeSeed" claim proportionally more area.
+  function computeVoronoi(pts, gap, sizeVariance){
     const bbox = [{x:0,y:0},{x:W,y:0},{x:W,y:H},{x:0,y:H}];
     const n = pts.length;
     const result = new Array(n);
+
+    const strength = ((sizeVariance||0)/100) * 0.4;
+    const avgSpacing = Math.sqrt((W*H)/Math.max(n,1));
+    const refR = avgSpacing/2;
+    const weights = new Array(n);
+    for(let i=0;i<n;i++){
+      const seed = pts[i].sizeSeed || 0;
+      const r = refR * Math.exp(seed*strength);
+      weights[i] = r*r;
+    }
+
     for(let i=0;i<n;i++){
       let poly = bbox;
       const si = pts[i];
+      const wi = weights[i];
       for(let j=0;j<n;j++){
         if(i===j) continue;
         const sj = pts[j];
@@ -382,14 +454,40 @@
         const d = Math.sqrt(dx*dx+dy*dy);
         if(d < 1e-6) continue;
         const nx = dx/d, ny = dy/d;
-        const mx = (si.x+sj.x)/2 - nx*(gap/2);
-        const my = (si.y+sj.y)/2 - ny*(gap/2);
+        const wj = weights[j];
+        const t = 0.5 + (wi - wj) / (2*d*d);
+        const mx = si.x + t*dx - nx*(gap/2);
+        const my = si.y + t*dy - ny*(gap/2);
         poly = clipHalfPlane(poly, nx, ny, mx, my);
         if(poly.length === 0) break;
       }
       result[i] = poly;
     }
     return result;
+  }
+
+  function polygonArea(pts){
+    let a = 0;
+    for(let i=0;i<pts.length;i++){
+      const p0=pts[i], p1=pts[(i+1)%pts.length];
+      a += p0.x*p1.y - p1.x*p0.y;
+    }
+    return Math.abs(a)/2;
+  }
+
+  // lighten/darken a #rrggbb color by percent (-100..100)
+  function shadeColor(hex, percent){
+    hex = (hex||'#888888').replace('#','');
+    if(hex.length===3) hex = hex.split('').map(c=>c+c).join('');
+    let r = parseInt(hex.substring(0,2),16)||0;
+    let g = parseInt(hex.substring(2,4),16)||0;
+    let b = parseInt(hex.substring(4,6),16)||0;
+    const f = (100+percent)/100;
+    r = Math.round(Math.min(255, Math.max(0, r*f)));
+    g = Math.round(Math.min(255, Math.max(0, g*f)));
+    b = Math.round(Math.min(255, Math.max(0, b*f)));
+    const hx = v => v.toString(16).padStart(2,'0');
+    return `#${hx(r)}${hx(g)}${hx(b)}`;
   }
 
   // rounded polygon path; radius 0 -> sharp corners
@@ -459,13 +557,13 @@
 
   function rebuildSitesFromCount(n){
     const pts = generateSeeds(n);
-    sites = pts.map(p => ({ x:p.x, y:p.y, color: randomColor() }));
+    sites = pts.map(p => ({ x:p.x, y:p.y, color: randomColor(), sizeSeed: Math.random()*2-1 }));
   }
 
   // ---------- render ----------
   const NS = 'http://www.w3.org/2000/svg';
   function render(){
-    cells = computeVoronoi(sites, parseFloat(gapSlider.value));
+    cells = computeVoronoi(sites, parseFloat(gapSlider.value), parseFloat(sizeVarianceNumber.value)||0);
     while(svg.firstChild) svg.removeChild(svg.firstChild);
 
     const bg = document.createElementNS(NS,'rect');
@@ -497,6 +595,31 @@
       g.appendChild(path);
     }
     svg.appendChild(g);
+
+    if(showNucleus.checked){
+      const ng = document.createElementNS(NS,'g');
+      const sizePct = parseFloat(nucleusSize.value)/100;
+      for(let i=0;i<cells.length;i++){
+        const poly = cells[i];
+        if(poly.length < 3) continue;
+        const area = polygonArea(poly);
+        const equivR = Math.sqrt(Math.max(area,0)/Math.PI);
+        const nr = Math.max(1.5, equivR * sizePct);
+        const cpt = polygonCentroid(poly);
+        const baseColor = sites[i].color;
+        const fill = nucleusAutoTint.checked ? shadeColor(baseColor, -45) : nucleusColor.value;
+        const stroke = nucleusAutoTint.checked ? shadeColor(baseColor, -65) : shadeColor(nucleusColor.value, -30);
+        const circ = document.createElementNS(NS,'circle');
+        circ.setAttribute('cx', cpt.x.toFixed(2));
+        circ.setAttribute('cy', cpt.y.toFixed(2));
+        circ.setAttribute('r', nr.toFixed(2));
+        circ.setAttribute('fill', fill);
+        circ.setAttribute('stroke', stroke);
+        circ.setAttribute('stroke-width', 1);
+        ng.appendChild(circ);
+      }
+      svg.appendChild(ng);
+    }
 
     if(showSeeds.checked){
       const sg = document.createElementNS(NS,'g');
@@ -543,7 +666,7 @@
     const p = svgPoint(e);
     const mode = currentMode();
     if(mode === 'add'){
-      sites.push({ x:p.x, y:p.y, color: randomColor() });
+      sites.push({ x:p.x, y:p.y, color: randomColor(), sizeSeed: Math.random()*2-1 });
       render();
     } else if(mode === 'remove'){
       const idx = nearestSiteIndex(p, 20);
@@ -563,6 +686,37 @@
   });
 
   window.addEventListener('mouseup', ()=>{ dragIndex = -1; });
+
+  // ---------- canvas size ----------
+  function applyCanvasSize(newW, newH){
+    newW = Math.max(200, Math.min(4000, Math.round(newW)||W));
+    newH = Math.max(200, Math.min(4000, Math.round(newH)||H));
+    if(newW === W && newH === H){
+      canvasWidthInput.value = W; canvasHeightInput.value = H;
+      return;
+    }
+    const scaleX = newW / W, scaleY = newH / H;
+    for(const s of sites){ s.x *= scaleX; s.y *= scaleY; }
+    W = newW; H = newH;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.setAttribute('width', W);
+    svg.setAttribute('height', H);
+    canvasWidthInput.value = W;
+    canvasHeightInput.value = H;
+    render();
+  }
+
+  el('btnApplySize').addEventListener('click', ()=>{
+    canvasPreset.value = 'custom';
+    applyCanvasSize(parseFloat(canvasWidthInput.value), parseFloat(canvasHeightInput.value));
+  });
+  canvasPreset.addEventListener('change', ()=>{
+    const v = canvasPreset.value;
+    if(v === 'custom') return;
+    const [w,h] = v.split('x').map(Number);
+    canvasWidthInput.value = w; canvasHeightInput.value = h;
+    applyCanvasSize(w,h);
+  });
 
   // ---------- controls wiring ----------
   seedCountInput.addEventListener('input', ()=>{
@@ -590,9 +744,27 @@
     edgeWidthValue.textContent = edgeWidth.value;
     scheduleRender();
   });
-  [edgeColor,bgColor,showCells,showEdges,showSeeds].forEach(elm=>{
+  [edgeColor,bgColor,showCells,showEdges,showSeeds,showNucleus,nucleusAutoTint,nucleusColor].forEach(elm=>{
     elm.addEventListener('input', scheduleRender);
     elm.addEventListener('change', scheduleRender);
+  });
+
+  sizeVarianceSlider.addEventListener('input', ()=>{
+    sizeVarianceNumber.value = sizeVarianceSlider.value;
+    scheduleRender();
+  });
+  sizeVarianceNumber.addEventListener('input', ()=>{
+    let v = Math.max(0, Math.min(600, parseFloat(sizeVarianceNumber.value||'0')));
+    if(v <= parseFloat(sizeVarianceSlider.max)) sizeVarianceSlider.value = v;
+    scheduleRender();
+  });
+  nucleusSize.addEventListener('input', ()=>{
+    nucleusSizeValue.textContent = nucleusSize.value;
+    scheduleRender();
+  });
+  el('btnRandomizeSizes').addEventListener('click', ()=>{
+    for(const s of sites) s.sizeSeed = Math.random()*2-1;
+    render();
   });
 
   el('btnGenerate').addEventListener('click', ()=>{
@@ -603,7 +775,7 @@
 
   el('btnRelax').addEventListener('click', ()=>{
     if(sites.length === 0) return;
-    const currentCells = computeVoronoi(sites, parseFloat(gapSlider.value));
+    const currentCells = computeVoronoi(sites, parseFloat(gapSlider.value), parseFloat(sizeVarianceNumber.value)||0);
     for(let i=0;i<sites.length;i++){
       if(currentCells[i].length < 3) continue;
       const c = polygonCentroid(currentCells[i]);
@@ -633,6 +805,37 @@
     a.href = url; a.download = 'voronoi-map.svg';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  });
+
+  function svgSource(){
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', NS);
+    return new XMLSerializer().serializeToString(clone);
+  }
+
+  el('btnCopySVG').addEventListener('click', async ()=>{
+    const src = svgSource();
+    const btn = el('btnCopySVG');
+    const original = btn.textContent;
+    const flash = (msg) => { btn.textContent = msg; setTimeout(()=>{ btn.textContent = original; }, 1300); };
+    try{
+      await navigator.clipboard.writeText(src);
+      flash('Copied!');
+    }catch(err){
+      try{
+        const ta = document.createElement('textarea');
+        ta.value = src;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash('Copied!');
+      }catch(err2){
+        flash('Copy failed — use Export');
+      }
+    }
   });
 
   el('btnExportPNG').addEventListener('click', ()=>{
